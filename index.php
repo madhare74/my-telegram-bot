@@ -3,17 +3,44 @@
 $token = "7818118293:AAENIdj7bbmYZuqfC_nQTjS-p_GFIWjJKn4"; // bot token
 $admin = "13448282"; // userID of your account
 
-// BOT
+// BOT - ИСПРАВЛЕННАЯ ФУНКЦИЯ С ОБРАБОТКОЙ ОШИБОК
 function bot($method, $datas = [])
 {
     global $token;
+    // Инициализируем curl
     $ch = curl_init();
-    curl_setopt_array($ch, array(
+    
+    // Задаем параметры
+    curl_setopt_array($ch, [
         CURLOPT_URL => 'https://api.telegram.org/bot' . $token . '/' . $method,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POSTFIELDS => $datas
-    ));
-    return json_decode(curl_exec($ch));
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $datas,
+        CURLOPT_HEADER => false,
+        CURLOPT_TIMEOUT => 30,
+    ]);
+    
+    // Выполняем запрос
+    $result = curl_exec($ch);
+    
+    // Проверяем на ошибки curl
+    if (curl_errno($ch)) {
+        error_log("CURL Error in bot() method '" . $method . "': " . curl_error($ch));
+        curl_close($ch);
+        return (object)['ok' => false, 'error_code' => 500, 'description' => curl_error($ch)];
+    }
+    
+    // Закрываем соединение
+    curl_close($ch);
+    
+    // Декодируем результат
+    $decoded = json_decode($result);
+    if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
+        error_log("JSON Decode Error in bot() method: " . json_last_error_msg());
+        return (object)['ok' => false, 'error_code' => 500, 'description' => 'Invalid JSON response from Telegram'];
+    }
+    
+    return $decoded;
 }
 // ================================================ \\
 
@@ -56,8 +83,16 @@ if (isset($update)) {
     }
 }
 // db
-$db =  json_decode(file_get_contents('db.json'), true);
-$step = $db['step'];
+$db_file = 'db.json';
+if (!file_exists($db_file)) {
+    file_put_contents($db_file, json_encode(["data" => [], "step" => ""]));
+}
+$db = json_decode(file_get_contents($db_file), true);
+if ($db === null) {
+    $db = ["data" => [], "step" => ""];
+}
+$step = isset($db['step']) ? $db['step'] : '';
+
 // keyboards
 $home = json_encode(['resize_keyboard' => true, 'keyboard' => [[['text' => "Add auto reply ✉️"]], [['text' => "remove auto reply 🚫"]]]]);
 $back = json_encode(['resize_keyboard' => true, 'keyboard' => [[['text' => "Back 🔙"]]]]);
@@ -72,13 +107,13 @@ if (isset($message) and $chat_id == $admin) {
     } elseif ($text == 'Back 🔙' || $text == "Done!") {
         bot('sendMessage', ['chat_id' => $chat_id, 'text' => "Hi welcome to Business Account Manager Bot! 🤖\n\nTo use the bot, just go to the telegram business section in your profile, enter the chatbot section and enter the bot username. 💼\n\nNote: Only premium users can use this option. ℹ️", 'reply_markup' => $home]);
         $db['step'] = "";
-        file_put_contents("db.json", json_encode($db));
+        file_put_contents($db_file, json_encode($db));
     }
     // add AUTO-REPLY
     elseif ($text == 'Add auto reply ✉️') {
         bot('sendMessage', ['chat_id' => $chat_id, 'text' => "To set up an auto-reply, type the message you want the bot to reply to (you'll send a reply to this text in the next step)", 'reply_markup' => $back]);
         $db['step'] = "add-1";
-        file_put_contents("db.json", json_encode($db));
+        file_put_contents($db_file, json_encode($db));
     }
     // remove existing auto-reply 
     elseif ($text == 'remove auto reply 🚫') {
@@ -87,10 +122,10 @@ if (isset($message) and $chat_id == $admin) {
             foreach ($db['data'] as $item) {
                 $list .= "<code>{$item['text']}</code>\n---\n";
             }
-            bot('sendMessage', ['chat_id' => $chat_id, 'text' => $list, 'parse_mode' => 'html',]);
+            bot('sendMessage', ['chat_id' => $chat_id, 'text' => $list, 'parse_mode' => 'html']);
             bot('sendMessage', ['chat_id' => $chat_id, 'text' => "To remove an item from the auto-reply, copy and paste one of the above", 'reply_markup' => $back]);
             $db['step'] = "remove";
-            file_put_contents("db.json", json_encode($db));
+            file_put_contents($db_file, json_encode($db));
         } else {
             bot('sendMessage', ['chat_id' => $chat_id, 'text' => "auto-reply list is empty!", 'reply_markup' => $home]);
         }
@@ -104,7 +139,7 @@ if (isset($message) and $chat_id == $admin) {
             'answers' => []
         ];
         $db['step'] = "add-2";
-        file_put_contents("db.json", json_encode($db));
+        file_put_contents($db_file, json_encode($db));
     } elseif ($step == 'add-2') {
         end($db['data']);
         $last_key = key($db['data']);
@@ -179,7 +214,7 @@ if (isset($message) and $chat_id == $admin) {
                 'content' => $content,
                 'caption' => $caption ?? ''
             ];
-            file_put_contents("db.json", json_encode($db));
+            file_put_contents($db_file, json_encode($db));
         } else {
             bot('sendMessage', ['chat_id' => $chat_id, 'text' => "There was a problem with the content you sent, please send another content", 'reply_markup' =>  json_encode(['resize_keyboard' => true, 'keyboard' => [[['text' => "Done!"]]]])]);
         }
@@ -198,7 +233,7 @@ if (isset($message) and $chat_id == $admin) {
         }
         $db['step'] = "";
         $db['data'] = array_values($db['data']); // reindex array
-        file_put_contents("db.json", json_encode($db));
+        file_put_contents($db_file, json_encode($db));
     }
 }
 
@@ -216,7 +251,6 @@ if (isset($b_message) && isset($b_id) && $b_chat_id != $admin) {
     // If no text content, skip (can't match)
     if (empty($message_content)) {
         // Optional: send a default response or ignore
-        // bot('sendMessage', ['business_connection_id' => $b_id, 'chat_id' => $b_chat_id, 'text' => "I received your media, but I can only auto-reply to text messages for now. Please send a text message."]);
         exit;
     }
     
@@ -226,7 +260,7 @@ if (isset($b_message) && isset($b_id) && $b_chat_id != $admin) {
     foreach ($db['data'] as $item) {
         $trigger_text_lower = mb_strtolower(trim($item['text']));
         
-        // Check for exact match or partial match (you can modify this logic)
+        // Check for exact match or partial match
         if ($trigger_text_lower == $message_content_lower || 
             strpos($message_content_lower, $trigger_text_lower) !== false) {
             
@@ -359,10 +393,5 @@ if (isset($b_message) && isset($b_id) && $b_chat_id != $admin) {
         //     'reply_parameters' => ['message_id' => $b_message_id]
         // ]);
     }
-}
-
-// For debugging - log errors to file (optional)
-if (function_exists('curl_error') && curl_error($ch)) {
-    error_log("CURL Error: " . curl_error($ch));
 }
 ?>
