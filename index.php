@@ -1,4 +1,7 @@
 <?php
+// Логируем ВСЁ, что приходит
+$input = file_get_contents('php://input');
+file_put_contents('telegram_log.txt', date('Y-m-d H:i:s') . ":\n" . $input . "\n---\n", FILE_APPEND);
 // Простейший отладочный бот
 $token = "7818118293:AAENIdj7bbmYZuqfC_nQTjS-p_GFIWjJKn4";
 $admin = "13448282";
