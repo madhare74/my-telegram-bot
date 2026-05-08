@@ -3,6 +3,7 @@
 $token = "7818118293:AAENIdj7bbmYZuqfC_nQTjS-p_GFIWjJKn4";
 $admin = "13448282";
 $db_file = 'db.json';
+$processed_ids_file = 'processed_ids.txt'; // файл для хранения ID обработанных обновлений
 
 // ==================== ФУНКЦИЯ ОТПРАВКИ ====================
 function bot_poll($method, $datas = []) {
@@ -13,7 +14,7 @@ function bot_poll($method, $datas = []) {
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => $datas,
-        CURLOPT_TIMEOUT => 30
+        CURLOPT_TIMEOUT => 10
     ]);
     $result = curl_exec($ch);
     $error = curl_error($ch);
@@ -29,30 +30,21 @@ if (!file_exists($db_file)) {
 $db = json_decode(file_get_contents($db_file), true);
 if (!is_array($db)) $db = ["data" => [], "step" => ""];
 
-// ==================== КЛАВИАТУРЫ ====================
-$home_keyboard = json_encode([
-    'keyboard' => [
-        [['text' => '📝 Добавить автоответ'], ['text' => '🗑 Удалить автоответ']],
-        [['text' => '📋 Список правил']]
-    ],
-    'resize_keyboard' => true,
-    'one_time_keyboard' => false
-]);
-
-$back_keyboard = json_encode([
-    'keyboard' => [[['text' => '🔙 Назад']]],
-    'resize_keyboard' => true
-]);
-
-// ==================== ОСНОВНОЙ ЦИКЛ ОПРОСА ====================
+// ==================== ОСНОВНОЙ ЦИКЛ С ЗАЩИТОЙ ОТ ДУБЛЕЙ ====================
 $last_update_id = 0;
 if (file_exists('last_id.txt')) $last_update_id = (int)file_get_contents('last_id.txt');
+
+// Загружаем ID уже обработанных обновлений
+$processed_ids = [];
+if (file_exists($processed_ids_file)) {
+    $processed_ids = explode("\n", file_get_contents($processed_ids_file));
+}
 
 while (true) {
     $url = "https://api.telegram.org/bot$token/getUpdates?offset=" . ($last_update_id + 1) . "&timeout=30";
     $response = file_get_contents($url);
     if ($response === false) {
-        sleep(2);
+        sleep(1);
         continue;
     }
     
@@ -63,7 +55,14 @@ while (true) {
     }
     
     foreach ($updates['result'] as $update) {
-        $last_update_id = $update['update_id'];
+        $update_id = $update['update_id'];
+        
+        // Пропускаем, если уже обработано
+        if (in_array($update_id, $processed_ids)) {
+            continue;
+        }
+        
+        $last_update_id = $update_id;
         file_put_contents('last_id.txt', $last_update_id);
         
         // ==================== ОБРАБОТКА НАЖАТИЙ НА КНОПКИ ====================
@@ -71,13 +70,11 @@ while (true) {
             $callback = $update['callback_query'];
             $callback_id = $callback['id'];
             $chat_id = $callback['message']['chat']['id'];
-            $message_id = $callback['message']['message_id'];
             $data = $callback['data'];
             
-            // Отвечаем на callback (убираем "часики" на кнопке)
+            // Отвечаем на callback сразу
             bot_poll('answerCallbackQuery', ['callback_query_id' => $callback_id]);
             
-            // Обработка действий от кнопок
             if ($data == 'add_reply') {
                 $db['step'] = 'add-1';
                 file_put_contents($db_file, json_encode($db));
@@ -85,37 +82,25 @@ while (true) {
                     'chat_id' => $chat_id,
                     'text' => "📝 Введите ключевое слово или фразу, на которую будет реагировать бот.\n\nПример: `привет`, `цена`, `доставка`",
                     'parse_mode' => 'Markdown',
-                    'reply_markup' => $back_keyboard
+                    'reply_markup' => json_encode(['remove_keyboard' => true])
                 ]);
             } elseif ($data == 'remove_reply') {
                 if (count($db['data']) == 0) {
-                    bot_poll('sendMessage', [
-                        'chat_id' => $chat_id,
-                        'text' => "📭 Список автоответов пуст. Добавьте новый через 'Добавить автоответ'."
-                    ]);
+                    bot_poll('sendMessage', ['chat_id' => $chat_id, 'text' => "📭 Список автоответов пуст."]);
                 } else {
-                    $list = "🗑 **Выберите правило для удаления:**\n\n";
                     $buttons = [];
                     foreach ($db['data'] as $index => $item) {
-                        $list .= "• `" . $item['text'] . "`\n";
                         $buttons[] = [['text' => $item['text'], 'callback_data' => 'remove_' . $index]];
                     }
                     bot_poll('sendMessage', [
                         'chat_id' => $chat_id,
-                        'text' => $list,
-                        'parse_mode' => 'Markdown',
-                        'reply_markup' => json_encode([
-                            'inline_keyboard' => $buttons,
-                            'resize_keyboard' => true
-                        ])
+                        'text' => "🗑 Выберите правило для удаления:",
+                        'reply_markup' => json_encode(['inline_keyboard' => $buttons])
                     ]);
                 }
             } elseif ($data == 'list_reply') {
                 if (count($db['data']) == 0) {
-                    bot_poll('sendMessage', [
-                        'chat_id' => $chat_id,
-                        'text' => "📭 Список автоответов пуст. Добавьте новый через 'Добавить автоответ'."
-                    ]);
+                    bot_poll('sendMessage', ['chat_id' => $chat_id, 'text' => "📭 Список автоответов пуст."]);
                 } else {
                     $list = "📋 **Ваши автоответы:**\n\n";
                     foreach ($db['data'] as $item) {
@@ -133,33 +118,30 @@ while (true) {
                     $removed_text = $db['data'][$index]['text'];
                     unset($db['data'][$index]);
                     $db['data'] = array_values($db['data']);
-                    $db['step'] = '';
                     file_put_contents($db_file, json_encode($db));
                     bot_poll('sendMessage', [
                         'chat_id' => $chat_id,
                         'text' => "✅ Правило *{$removed_text}* удалено!",
                         'parse_mode' => 'Markdown'
                     ]);
-                } else {
-                    bot_poll('sendMessage', [
-                        'chat_id' => $chat_id,
-                        'text' => "❌ Правило не найдено."
-                    ]);
                 }
             }
         }
         
-        // ==================== ОБРАБОТКА БИЗНЕС-СООБЩЕНИЙ ====================
+        // ==================== ОБРАБОТКА БИЗНЕС-СООБЩЕНИЙ (ОТ КЛИЕНТОВ) ====================
         if (isset($update['business_message'])) {
             $msg = $update['business_message'];
             $b_id = $msg['business_connection_id'];
-            $text = $msg['text'] ?? '';
+            $text = trim($msg['text'] ?? '');
             $chat_id = $msg['chat']['id'];
             $message_id = $msg['message_id'];
             
+            // НЕ отвечаем самому себе (админу)
             if ($chat_id != $admin && !empty($text)) {
+                $replied = false;
                 foreach ($db['data'] as $item) {
-                    if (stripos($text, $item['text']) !== false) {
+                    $trigger = trim($item['text']);
+                    if (!empty($trigger) && stripos($text, $trigger) !== false) {
                         foreach ($item['answers'] as $answer) {
                             bot_poll('sendMessage', [
                                 'business_connection_id' => $b_id,
@@ -168,24 +150,32 @@ while (true) {
                                 'reply_parameters' => json_encode(['message_id' => $message_id])
                             ]);
                         }
+                        $replied = true;
                         break;
                     }
+                }
+                // Опционально: если нет совпадения — стандартный ответ
+                if (!$replied) {
+                    // bot_poll('sendMessage', [
+                    //     'business_connection_id' => $b_id,
+                    //     'chat_id' => $chat_id,
+                    //     'text' => "Спасибо за сообщение! Я свяжусь с вами.",
+                    //     'reply_parameters' => json_encode(['message_id' => $message_id])
+                    // ]);
                 }
             }
         }
         
-        // ==================== ОБРАБОТКА СООБЩЕНИЙ АДМИНИСТРАТОРА ====================
+        // ==================== ОБРАБОТКА СООБЩЕНИЙ ОТ АДМИНИСТРАТОРА ====================
         if (isset($update['message']) && $update['message']['chat']['id'] == $admin) {
-            $text = $update['message']['text'] ?? '';
+            $text = trim($update['message']['text'] ?? '');
             $chat_id = $update['message']['chat']['id'];
-            $message_id = $update['message']['message_id'];
             $step = $db['step'] ?? '';
             
-            // Команда /start
             if ($text == '/start') {
                 bot_poll('sendMessage', [
                     'chat_id' => $chat_id,
-                    'text' => "🤖 *Бизнес-бот для Telegram*\n\nЯ умею автоматически отвечать на сообщения в вашем бизнес-аккаунте.\n\n📌 *Как настроить:*\n1. Добавьте правило через кнопку ниже\n2. Введите ключевую фразу\n3. Отправьте ответ (текст, фото, видео)\n4. Нажмите Готово\n\n✨ Бот работает в фоне и отвечает от вашего имени!",
+                    'text' => "🤖 *Бизнес-бот для Telegram*\n\nНастройте автоответы через меню:",
                     'parse_mode' => 'Markdown',
                     'reply_markup' => json_encode([
                         'inline_keyboard' => [
@@ -195,31 +185,26 @@ while (true) {
                         ]
                     ])
                 ]);
-            }
-            // Шаг 1: получение ключевой фразы
-            elseif ($step == 'add-1') {
-                bot_poll('sendMessage', [
-                    'chat_id' => $chat_id,
-                    'text' => "✍️ Отправьте текст, который будет содержать ваш ответ.\n\nЭто может быть текст, фото, видео, стикер или другой файл.\n\n*Нажмите 'Готово', когда закончите добавлять ответы*",
-                    'parse_mode' => 'Markdown',
-                    'reply_markup' => $back_keyboard
-                ]);
-                $db['data'][] = ['text' => $text, 'answers' => []];
-                $db['step'] = 'add-2';
-                file_put_contents($db_file, json_encode($db));
-            }
-            // Шаг 2: получение ответов (можно несколько)
-            elseif ($step == 'add-2') {
-                end($db['data']);
-                $last_key = key($db['data']);
-                
-                // Определяем тип контента
+            } elseif ($step == 'add-1') {
+                if (empty($text)) {
+                    bot_poll('sendMessage', ['chat_id' => $chat_id, 'text' => "❌ Отправьте текстовую фразу."]);
+                } else {
+                    $db['data'][] = ['text' => $text, 'answers' => []];
+                    $db['step'] = 'add-2';
+                    file_put_contents($db_file, json_encode($db));
+                    bot_poll('sendMessage', [
+                        'chat_id' => $chat_id,
+                        'text' => "✍️ Отправьте ответ (текст, фото, видео, стикер).\n\nМожно добавить несколько ответов. Когда закончите — нажмите /done",
+                        'parse_mode' => 'Markdown'
+                    ]);
+                }
+            } elseif ($step == 'add-2') {
                 $type = null;
                 $content = null;
                 
-                if (isset($update['message']['text'])) {
+                if (isset($update['message']['text']) && $text != '/done') {
                     $type = 'text';
-                    $content = $update['message']['text'];
+                    $content = $text;
                 } elseif (isset($update['message']['sticker'])) {
                     $type = 'sticker';
                     $content = $update['message']['sticker']['file_id'];
@@ -238,61 +223,43 @@ while (true) {
                 } elseif (isset($update['message']['audio'])) {
                     $type = 'audio';
                     $content = $update['message']['audio']['file_id'];
-                } elseif (isset($update['message']['animation'])) {
-                    $type = 'animation';
-                    $content = $update['message']['animation']['file_id'];
                 }
                 
                 if ($type && $content) {
+                    end($db['data']);
+                    $last_key = key($db['data']);
                     $db['data'][$last_key]['answers'][] = [
                         'type' => $type,
                         'content' => $content,
                         'caption' => $update['message']['caption'] ?? ''
                     ];
                     file_put_contents($db_file, json_encode($db));
-                    
                     bot_poll('sendMessage', [
                         'chat_id' => $chat_id,
-                        'text' => "✅ Ответ добавлен!\n\nМожете добавить ещё один ответ или нажмите 'Готово'",
+                        'text' => "✅ Ответ добавлен! Отправьте ещё или /done для завершения."
+                    ]);
+                } elseif ($text == '/done') {
+                    $db['step'] = '';
+                    file_put_contents($db_file, json_encode($db));
+                    bot_poll('sendMessage', [
+                        'chat_id' => $chat_id,
+                        'text' => "🎉 Настройка завершена! Ваши автоответы сохранены.",
                         'reply_markup' => json_encode([
-                            'keyboard' => [[['text' => '✅ Готово'], ['text' => '🔙 Назад']]],
-                            'resize_keyboard' => true
+                            'inline_keyboard' => [
+                                [['text' => '📝 Добавить ещё', 'callback_data' => 'add_reply']],
+                                [['text' => '📋 Список правил', 'callback_data' => 'list_reply']]
+                            ]
                         ])
                     ]);
+                } else {
+                    bot_poll('sendMessage', ['chat_id' => $chat_id, 'text' => "❌ Неподдерживаемый тип содержимого. Отправьте текст, фото или стикер."]);
                 }
             }
-            // Кнопка "Готово" — завершение добавления
-            elseif ($text == '✅ Готово') {
-                $db['step'] = '';
-                file_put_contents($db_file, json_encode($db));
-                bot_poll('sendMessage', [
-                    'chat_id' => $chat_id,
-                    'text' => "🎉 Настройка завершена! Ваши автоответы сохранены.\n\nТеперь бот будет отвечать клиентам автоматически.",
-                    'reply_markup' => json_encode([
-                        'inline_keyboard' => [
-                            [['text' => '📝 Добавить ещё', 'callback_data' => 'add_reply']],
-                            [['text' => '📋 Список правил', 'callback_data' => 'list_reply']]
-                        ]
-                    ])
-                ]);
-            }
-            // Кнопка "Назад" — отмена
-            elseif ($text == '🔙 Назад') {
-                $db['step'] = '';
-                file_put_contents($db_file, json_encode($db));
-                bot_poll('sendMessage', [
-                    'chat_id' => $chat_id,
-                    'text' => "⏹ Действие отменено.",
-                    'reply_markup' => json_encode([
-                        'inline_keyboard' => [
-                            [['text' => '📝 Добавить автоответ', 'callback_data' => 'add_reply']],
-                            [['text' => '🗑 Удалить автоответ', 'callback_data' => 'remove_reply']],
-                            [['text' => '📋 Список правил', 'callback_data' => 'list_reply']]
-                        ]
-                    ])
-                ]);
-            }
         }
+        
+        // Помечаем обновление как обработанное
+        $processed_ids[] = $update_id;
+        file_put_contents($processed_ids_file, implode("\n", $processed_ids));
     }
     sleep(1);
 }
